@@ -4,6 +4,77 @@
 
 	go install mvdan.cc/gofumpt@latest
 
+---
+
+## About this fork
+
+This fork carries one patch on top of upstream: **every dotless module path in
+`go.mod` is treated as non-standard-library for import grouping.**
+
+Import grouping decides an import is standard library when its first path
+element has no dot, since that is what dotless paths normally mean. Upstream
+makes a single exception, for the module's own path. That is not enough for a
+codebase which imports *another* dotless module path — typically a shared
+internal library resolved through a `replace` directive:
+
+```
+// go.mod
+module app
+require shared v1.0.0
+replace shared => example.org/platform/shared v1.1.0
+```
+
+Upstream correctly leaves `app/...` alone but hoists every `shared/...`
+import into the std group, so running it over such a repository produces a wall
+of unrelated import churn.
+
+The standard library is never a module dependency, so any dotless path named in
+a `require` or `replace` directive is safe to treat as third party. This fork
+collects them alongside the module's own path while it reads `go.mod`. **It
+needs no flag and no configuration** — editors and other tools that invoke
+`gofumpt` with no arguments get the right grouping too. `-modpath` still works
+as a manual override and now accepts a comma-separated list, e.g.
+`-modpath=app,shared`.
+
+Everything else matches upstream, including the default rule set.
+
+### Installing this fork
+
+From a checkout of this repository:
+
+```sh
+go install .
+```
+
+That replaces `gofumpt` on your `PATH`, which is safe for other repositories:
+a real module path cannot contain a comma, so behaviour for a single module
+path is byte-for-byte identical to upstream.
+
+To tell the two apart at a glance, stamp a version when installing — otherwise
+`gofumpt -version` reports the bare module version and the fork is
+indistinguishable from upstream:
+
+```sh
+go install -ldflags="-X main.version=$(git describe --tags --dirty)-fork" .
+gofumpt -version
+```
+
+To confirm the patch is live, run `gofumpt -d` over a file that imports a
+dotless dependency and check that its imports are left where they are.
+
+### Caveats
+
+- **`gopls` and `golangci-lint` do not pick this up.** Both link the upstream
+  `format` package into their own binary rather than shelling out, and
+  `golangci-lint`'s `module-path` setting takes a single path. Configure your
+  editor to run the `gofumpt` binary directly (as a formatter) instead of using
+  the `gofumpt` support built into `gopls`.
+- Rebasing onto a new upstream release means re-applying this patch. It touches
+  `joinStdImports` in `format/format.go` and the `go.mod` defaulting in
+  `gofmt.go`; both have been stable across releases.
+
+---
+
 Enforce a stricter format than `gofmt`, while being backwards compatible.
 That is, `gofumpt` is happy with a subset of the formats that `gofmt` is happy with.
 
@@ -528,9 +599,12 @@ result := compute(
 
 `gofumpt` is a replacement for `gofmt`, so you can simply `go install` it as
 described at the top of this README and use it.
+To build this fork instead, see [Installing this fork](#installing-this-fork).
 
 When using an IDE or editor with Go integration based on `gopls`,
 it's best to configure the editor to use the `gofumpt` support built into `gopls`.
+Note that this does not apply to this fork, which `gopls` cannot load; see
+[Caveats](#caveats).
 
 The instructions below show how to set up `gofumpt` for some of the
 major editors out there.
