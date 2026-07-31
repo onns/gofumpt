@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,8 @@ var (
 	// (e.g. octal literal syntax requires go1.13); defaulted from go.mod.
 	// -modpath sets the current module path so import grouping can treat
 	// imports sharing that prefix as third-party; defaulted from go.mod.
+	// It accepts a comma-separated list, for codebases importing dotless
+	// module paths besides their own, e.g. -modpath=app,shared.
 	// -extra opts in to non-default rules like group_params.
 	// -version prints the gofumpt build version (set via -ldflags=main.version=).
 	langVersion = flag.String("lang", "", "")
@@ -137,7 +140,8 @@ func usage() {
 	-extra    enable extra rules, e.g. -extra=group_params,clothe_returns
 
 	-lang       str    target Go version in the form "go1.X" (default from go.mod)
-	-modpath    str    Go module path containing the source file (default from go.mod)
+	-modpath    str    Go module path containing the source file, comma-separated
+	                   for extra dotless prefixes (default from go.mod)
 `)
 }
 
@@ -368,7 +372,7 @@ func processFile(filename string, info fs.FileInfo, in io.Reader, r *reporter, e
 				}
 			}
 			if m := mod.file.Module; m != nil && modpath == "" {
-				modpath = m.Mod.Path
+				modpath = strings.Join(append([]string{m.Mod.Path}, dotlessDeps(mod.file)...), ",")
 			}
 		}
 	}
@@ -663,6 +667,38 @@ var cachedModuleByDir sync.Map // map[string]*cachedModule
 type cachedModule struct {
 	absDir string // the directory where the go.mod file was found
 	file   *modfile.File
+}
+
+// NOTE(gofumpt): dotlessDeps returns the module paths required or replaced by
+// the given go.mod whose first path element has no dot, such as "shared"
+// resolved via a replace directive. Import grouping otherwise mistakes those
+// for standard library packages, as std is what dotless paths normally mean.
+// The standard library is never a module dependency, so anything named here is
+// safe to treat as third-party. They join the module's own path in
+// [gformat.Options.ModulePath] so that no flag is needed for editors and other
+// tools which invoke gofumpt without arguments.
+func dotlessDeps(file *modfile.File) (paths []string) {
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if i := strings.IndexByte(path, '/'); i != -1 {
+			path = path[:i]
+		}
+		if strings.Contains(path, ".") || slices.Contains(paths, path) {
+			return
+		}
+		paths = append(paths, path)
+	}
+	for _, require := range file.Require {
+		add(require.Mod.Path)
+	}
+	for _, replace := range file.Replace {
+		// Only the old path can appear in an import; the new path is either a
+		// module path or a local directory, and neither is imported directly.
+		add(replace.Old.Path)
+	}
+	return
 }
 
 func loadModule(dir string) *cachedModule {

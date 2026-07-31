@@ -55,6 +55,13 @@ type Options struct {
 	// ModulePath is used for formatting decisions like what import paths are
 	// considered to be not part of the standard library. When empty, the source
 	// is formatted as if it weren't inside a module.
+	//
+	// A comma-separated list of module paths may be given, for codebases which
+	// import other dotless module paths besides their own, such as a shared
+	// internal library resolved via a replace directive. Every listed path
+	// contributes a prefix which is treated as not part of the standard
+	// library. For example, "app,shared" keeps both "app/..." and
+	// "shared/..." out of the std import group.
 	ModulePath string
 
 	// ExtraRules enables all extra formatting rules, such as grouping function
@@ -1407,15 +1414,20 @@ func (f *fumpter) joinStdImports(d *ast.GenDecl) {
 	// but historically some private codebases have done so.
 	// This is a relatively harmless way to make gofumpt compatible with them,
 	// as it changes nothing for the common external module paths.
-	var modulePrefix string
-	if f.ModulePath == "" {
-		// Nothing to do.
-	} else if i := strings.IndexByte(f.ModulePath, '/'); i != -1 {
-		// ModulePath is "foo/bar", so we use "foo" as the prefix.
-		modulePrefix = f.ModulePath[:i]
-	} else {
-		// ModulePath is "foo", so we use "foo" as the prefix.
-		modulePrefix = f.ModulePath
+	//
+	// ModulePath may list several comma-separated module paths, as such a
+	// codebase tends to import more than one dotless path; see its docs.
+	var modulePrefixes []string
+	for modulePath := range strings.SplitSeq(f.ModulePath, ",") {
+		if modulePath == "" {
+			// Nothing to do.
+		} else if i := strings.IndexByte(modulePath, '/'); i != -1 {
+			// modulePath is "foo/bar", so we use "foo" as the prefix.
+			modulePrefixes = append(modulePrefixes, modulePath[:i])
+		} else {
+			// modulePath is "foo", so we use "foo" as the prefix.
+			modulePrefixes = append(modulePrefixes, modulePath)
+		}
 	}
 
 	for i, spec := range d.Specs {
@@ -1449,10 +1461,12 @@ func (f *fumpter) joinStdImports(d *ast.GenDecl) {
 			strings.HasPrefix(path, "test/"),
 			strings.HasPrefix(path, "example/"),
 
-			// See if we match modulePrefix; see its documentation above.
+			// See if we match any modulePrefix; see its documentation above.
 			// We match either exactly or with a slash suffix,
 			// so that the prefix "foo" for "foo/..." does not match "foobar".
-			path == modulePrefix || strings.HasPrefix(path, modulePrefix+"/"),
+			slices.ContainsFunc(modulePrefixes, func(modulePrefix string) bool {
+				return path == modulePrefix || strings.HasPrefix(path, modulePrefix+"/")
+			}),
 
 			// To be conservative, if an import has a name
 			// and isn't part of the top group, treat it as non-std.
